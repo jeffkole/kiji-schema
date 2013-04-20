@@ -31,6 +31,12 @@ import org.codehaus.jackson.JsonNode;
 import org.junit.Test;
 
 import org.kiji.schema.DecodedCell;
+import org.kiji.schema.avro.ComponentType;
+import org.kiji.schema.avro.HashSpec;
+import org.kiji.schema.avro.HashType;
+import org.kiji.schema.avro.RowKeyComponent;
+import org.kiji.schema.avro.RowKeyEncoding;
+import org.kiji.schema.avro.RowKeyFormat2;
 import org.kiji.schema.avro.TestComplexRecord;
 import org.kiji.schema.avro.TestRecord;
 
@@ -86,6 +92,20 @@ public class TestKijiRowFilterSerialization {
         .build();
     runTest(new ColumnValueEqualsRowFilter("family", "qualifier",
         new DecodedCell(record.getSchema(), record)));
+  }
+
+  @Test
+  public void testFormattedEntityIdRowFilter() throws Exception {
+    runTest(new FormattedEntityIdRowFilter(
+        RowKeyFormat2.newBuilder()
+            .setEncoding(RowKeyEncoding.FORMATTED)
+            .setSalt(new HashSpec(HashType.MD5, 1, false))
+            .setComponents(ImmutableList.of(
+                new RowKeyComponent("a", ComponentType.INTEGER),
+                new RowKeyComponent("b", ComponentType.LONG),
+                new RowKeyComponent("c", ComponentType.STRING)))
+            .build(),
+        100, null, "value"));
   }
 
   private void runTest(KijiRowFilter original) throws Exception {
