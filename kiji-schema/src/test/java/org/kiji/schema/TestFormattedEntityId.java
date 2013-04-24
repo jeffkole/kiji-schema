@@ -201,6 +201,21 @@ public class TestFormattedEntityId extends KijiClientTest {
     return format;
   }
 
+  private RowKeyFormat2 makeUnsaltedRowKeyFormat() {
+    // components of the row key
+    final List<RowKeyComponent> components = Lists.newArrayList(
+        RowKeyComponent.newBuilder().setName("astring").setType(ComponentType.STRING).build(),
+        RowKeyComponent.newBuilder().setName("anint").setType(ComponentType.INTEGER).build(),
+        RowKeyComponent.newBuilder().setName("along").setType(ComponentType.LONG).build());
+
+    // build the row key format
+    final RowKeyFormat2 format = RowKeyFormat2.newBuilder().setEncoding(RowKeyEncoding.FORMATTED)
+        .setComponents(components)
+        .build();
+
+    return format;
+  }
+
   public static FormattedEntityId makeId(RowKeyFormat2 format, Object... components) {
     final FormattedEntityId eid =
         FormattedEntityId.getEntityId(Lists.newArrayList(components), format);
@@ -605,5 +620,16 @@ public class TestFormattedEntityId extends KijiClientTest {
 
     final FormattedEntityId formattedEntityId = makeId(format, "one");
     assertEquals("hbase=hex:f9", formattedEntityId.toShellString());
+  }
+
+  @Test
+  public void testUnsaltedRowKeyFormat() {
+    final RowKeyFormat2 format = makeUnsaltedRowKeyFormat();
+
+    final FormattedEntityId formattedEntityId = makeId(format, "one", 1, 7L);
+    byte[] hbaseRowKey = formattedEntityId.getHBaseRowKey();
+
+    final FormattedEntityId testEntityId = FormattedEntityId.fromHBaseRowKey(hbaseRowKey, format);
+    assertArrayEquals(formattedEntityId.getHBaseRowKey(), testEntityId.getHBaseRowKey());
   }
 }
