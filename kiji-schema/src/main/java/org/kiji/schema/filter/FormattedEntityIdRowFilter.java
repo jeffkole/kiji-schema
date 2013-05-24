@@ -33,6 +33,8 @@ import com.google.common.base.Preconditions;
 
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.filter.Filter;
+import org.apache.hadoop.hbase.filter.FilterList;
+import org.apache.hadoop.hbase.filter.PrefixFilter;
 import org.apache.hadoop.hbase.filter.RegexStringComparator;
 import org.apache.hadoop.hbase.filter.RowFilter;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -160,6 +162,13 @@ public final class FormattedEntityIdRowFilter extends KijiRowFilter {
   /** {@inheritDoc} */
   @Override
   public Filter toHBaseFilter(Context context) throws IOException {
+    // In the case that we have enough information to generate a prefix, we will
+    // construct a PrefixFilter that is AND'ed with the RowFilter.  This way,
+    // when the scan passes the end of the prefix, it can end the filtering
+    // process quickly.
+    boolean addPrefixFilter = false;
+    ByteArrayOutputStream prefixBytes = new ByteArrayOutputStream();
+
     // Define a regular expression that effectively creates a mask for the row
     // key based on the key format and the components passed in.  Prefix hashes
     // are skipped over, and null components match any value.
@@ -189,12 +198,20 @@ public final class FormattedEntityIdRowFilter extends KijiRowFilter {
           for (byte hashedByte : hashed) {
             regex.append(String.format("\\x%02x", hashedByte & 0xFF));
           }
+
+          addPrefixFilter = true;
+          // Write the hashed bytes to the prefix buffer
+          prefixBytes.write(hashed, 0, hashed.length);
         } else {
           // match any character exactly 'hash size' number of times
           regex.append(".{").append(mRowKeyFormat.getSalt().getHashSize()).append("}");
         }
       }
     }
+    // Only add to the prefix buffer until we hit a null component.  We do this
+    // here, because the prefix is going to expect to have 0x00 component
+    // terminators, which we put in during this loop but not in the loop above.
+    boolean hitNullComponent = false;
     for (int i = 0; i < mComponents.length; i++) {
       final Object component = mComponents[i];
       switch (mRowKeyFormat.getComponents().get(i).getType()) {
@@ -204,11 +221,15 @@ public final class FormattedEntityIdRowFilter extends KijiRowFilter {
             // the end of the EntityId, otherwise, match the correct number of
             // bytes
             regex.append("(.{").append(Bytes.SIZEOF_INT).append("})?");
+            hitNullComponent = true;
           } else {
             byte[] tempBytes = toBytes((Integer) component);
             // match each byte in the integer using a regex hex sequence
             for (byte tempByte : tempBytes) {
               regex.append(String.format("\\x%02x", tempByte & 0xFF));
+            }
+            if (!hitNullComponent) {
+              prefixBytes.write(tempBytes, 0, tempBytes.length);
             }
           }
           break;
@@ -218,11 +239,15 @@ public final class FormattedEntityIdRowFilter extends KijiRowFilter {
             // the end of the EntityId, otherwise, match the correct number of
             // bytes
             regex.append("(.{").append(Bytes.SIZEOF_LONG).append("})?");
+            hitNullComponent = true;
           } else {
             byte[] tempBytes = toBytes((Long) component);
             // match each byte in the long using a regex hex sequence
             for (byte tempByte : tempBytes) {
               regex.append(String.format("\\x%02x", tempByte & 0xFF));
+            }
+            if (!hitNullComponent) {
+              prefixBytes.write(tempBytes, 0, tempBytes.length);
             }
           }
           break;
@@ -232,6 +257,7 @@ public final class FormattedEntityIdRowFilter extends KijiRowFilter {
             // delimiter, or match nothing at all in case the component was at
             // the end of the EntityId and skipped entirely
             regex.append("([^\\x00]+\\x00)?");
+            hitNullComponent = true;
           } else {
             // FormattedEntityId converts a string component to UTF-8 bytes to
             // create the HBase key.  RegexStringComparator will convert the
@@ -241,6 +267,10 @@ public final class FormattedEntityIdRowFilter extends KijiRowFilter {
             byte[] utfBytes = toBytes((String) component);
             String isoString = new String(utfBytes, Charsets.ISO_8859_1);
             regex.append(isoString).append("\\x00");
+            if (!hitNullComponent) {
+              prefixBytes.write(utfBytes, 0, utfBytes.length);
+              prefixBytes.write((byte) 0);
+            }
           }
           break;
         default:
@@ -252,6 +282,10 @@ public final class FormattedEntityIdRowFilter extends KijiRowFilter {
 
     final RegexStringComparator comparator = new RegexStringComparator(regex.toString());
     comparator.setCharset(Charsets.ISO_8859_1);
+    if (addPrefixFilter) {
+      return new FilterList(new PrefixFilter(prefixBytes.toByteArray()),
+          new RowFilter(CompareOp.EQUAL, comparator));
+    }
     return new RowFilter(CompareOp.EQUAL, comparator);
   }
 

@@ -36,6 +36,8 @@ import java.util.Random;
 import com.google.common.collect.ImmutableList;
 
 import org.apache.hadoop.hbase.filter.Filter;
+import org.apache.hadoop.hbase.filter.FilterList;
+import org.apache.hadoop.hbase.filter.PrefixFilter;
 import org.apache.hadoop.hbase.filter.RowFilter;
 import org.apache.hadoop.hbase.filter.WritableByteArrayComparable;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -353,7 +355,7 @@ public class TestFormattedEntityIdRowFilter {
     // Deserialize the filter
     ByteArrayInputStream bais = new ByteArrayInputStream(baos.toByteArray());
     DataInputStream dis = new DataInputStream(bais);
-    Filter deserializedFilter = new RowFilter();
+    Filter deserializedFilter = new FilterList();
     deserializedFilter.readFields(dis);
 
     // Filter an entity with the deserialized filter
@@ -406,6 +408,30 @@ public class TestFormattedEntityIdRowFilter {
     runTest(rowKeyFormat, filter, factory, EXCLUDE, 0, null, null);
   }
 
+  @Test
+  public void testPrefixFilterHaltsFiltering() throws Exception {
+    RowKeyFormat2 rowKeyFormat = createRowKeyFormat(1, INTEGER, LONG, LONG);
+    EntityIdFactory factory = EntityIdFactory.getFactory(rowKeyFormat);
+    FormattedEntityIdRowFilter filter = createFilter(rowKeyFormat, 100, null, 9000L);
+    Filter hbaseFilter = filter.toHBaseFilter(null);
+
+    EntityId passingEntityId = factory.getEntityId(100, 100L, 9000L);
+    byte[] passingHbaseKey = passingEntityId.getHBaseRowKey();
+    doInclusionAssert(rowKeyFormat, filter, passingEntityId, hbaseFilter, passingHbaseKey, INCLUDE);
+    boolean filterAllRemaining = hbaseFilter.filterAllRemaining();
+    String message = createFailureMessage(rowKeyFormat, filter, passingEntityId, hbaseFilter,
+        passingHbaseKey, filterAllRemaining);
+    assertEquals(message, false, filterAllRemaining);
+
+    EntityId failingEntityId = factory.getEntityId(101, 100L, 9000L);
+    byte[] failingHbaseKey = failingEntityId.getHBaseRowKey();
+    doInclusionAssert(rowKeyFormat, filter, failingEntityId, hbaseFilter, failingHbaseKey, EXCLUDE);
+    filterAllRemaining = hbaseFilter.filterAllRemaining();
+    message = createFailureMessage(rowKeyFormat, filter, failingEntityId, hbaseFilter,
+        failingHbaseKey, filterAllRemaining);
+    assertEquals(message, true, filterAllRemaining);
+  }
+
   private void runTest(RowKeyFormat2 rowKeyFormat, FormattedEntityIdRowFilter filter,
       EntityIdFactory factory, boolean expectedFilter, Object... components) throws Exception {
     EntityId entityId = factory.getEntityId(components);
@@ -418,11 +444,18 @@ public class TestFormattedEntityIdRowFilter {
       EntityId entityId, Filter hbaseFilter, byte[] hbaseKey, boolean expectedFilter)
       throws Exception {
     boolean filtered = hbaseFilter.filterRowKey(hbaseKey, 0, hbaseKey.length);
-    String message = String.format(
-        "RowKeyFormat: %s%nComponents: %s%nEntityId: %s%nRegex: %s%nHBase key: %s%nIncluded: %s%n",
-        rowKeyFormat, fetchComponents(filter), entityId.toShellString(), fetchRegex(hbaseFilter),
-        toBinaryString(hbaseKey), !filtered);
+    String message = createFailureMessage(rowKeyFormat, filter, entityId, hbaseFilter,
+        hbaseKey, filtered);
     assertEquals(message, expectedFilter, filtered);
+  }
+
+  private String createFailureMessage(RowKeyFormat2 rowKeyFormat, FormattedEntityIdRowFilter filter,
+      EntityId entityId, Filter hbaseFilter, byte[] hbaseKey, boolean filtered)
+      throws Exception {
+    return String.format(
+        "RowKeyFormat: %s%nComponents: %s%nEntityId: %s%nFilter: %s%nHBase key: %s%nIncluded: %s%n",
+        rowKeyFormat, fetchComponents(filter), entityId.toShellString(),
+        filterToString(hbaseFilter), toBinaryString(hbaseKey), !filtered);
   }
 
   private String toBinaryString(byte[] bytes) {
@@ -439,11 +472,25 @@ public class TestFormattedEntityIdRowFilter {
     return newArrayList((Object[])componentField.get(filter)).toString();
   }
 
-  private String fetchRegex(Filter filter) throws Exception {
-    RowFilter rowFilter = (RowFilter) filter;
+  private String filterToString(Filter filter) throws Exception {
+    if (filter instanceof FilterList) {
+      List<Filter> filters = ((FilterList) filter).getFilters();
+      return String.format("[%s] AND [%s]",
+          prefixFilterToString((PrefixFilter) filters.get(0)),
+          rowFilterToString((RowFilter) filters.get(1)));
+    } else {
+      return rowFilterToString((RowFilter) filter);
+    }
+  }
+
+  private String prefixFilterToString(PrefixFilter prefixFilter) throws Exception {
+    return toBinaryString(prefixFilter.getPrefix());
+  }
+
+  private String rowFilterToString(RowFilter rowFilter) throws Exception {
     WritableByteArrayComparable comparator = rowFilter.getComparator();
     Field patternField = comparator.getClass().getDeclaredField("pattern");
     patternField.setAccessible(true);
-    return patternField.get(comparator).toString();
+    return String.format("Regex: %s", patternField.get(comparator));
   }
 }
