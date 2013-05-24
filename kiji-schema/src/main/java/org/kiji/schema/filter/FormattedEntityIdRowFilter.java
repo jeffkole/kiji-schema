@@ -19,9 +19,13 @@
 
 package org.kiji.schema.filter;
 
+import static com.google.common.collect.Lists.newArrayList;
+
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.List;
 
 import com.google.common.base.Charsets;
 import com.google.common.base.Objects;
@@ -45,6 +49,7 @@ import org.kiji.schema.KijiIOException;
 import org.kiji.schema.avro.RowKeyEncoding;
 import org.kiji.schema.avro.RowKeyFormat2;
 import org.kiji.schema.util.FromJson;
+import org.kiji.schema.util.Hasher;
 import org.kiji.schema.util.ToJson;
 
 /**
@@ -169,8 +174,25 @@ public final class FormattedEntityIdRowFilter extends KijiRowFilter {
     StringBuilder regex = new StringBuilder("(?s)^"); // ^ matches the beginning of the string
     if (null != mRowKeyFormat.getSalt()) {
       if (mRowKeyFormat.getSalt().getHashSize() > 0) {
-        // match any character exactly 'hash size' number of times
-        regex.append(".{").append(mRowKeyFormat.getSalt().getHashSize()).append("}");
+        // If all of the components included in the hash have been specified,
+        // then match on the value of the hash
+        Object[] prefixComponents =
+            getNonNullPrefixComponents(mComponents, mRowKeyFormat.getRangeScanStartIndex());
+        if (prefixComponents.length == mRowKeyFormat.getRangeScanStartIndex()) {
+          ByteArrayOutputStream tohash = new ByteArrayOutputStream();
+          for (Object component : prefixComponents) {
+            byte[] componentBytes = toBytes(component);
+            tohash.write(componentBytes, 0, componentBytes.length);
+          }
+          byte[] hashed = Arrays.copyOfRange(Hasher.hash(tohash.toByteArray()), 0,
+              mRowKeyFormat.getSalt().getHashSize());
+          for (byte hashedByte : hashed) {
+            regex.append(String.format("\\x%02x", hashedByte & 0xFF));
+          }
+        } else {
+          // match any character exactly 'hash size' number of times
+          regex.append(".{").append(mRowKeyFormat.getSalt().getHashSize()).append("}");
+        }
       }
     }
     for (int i = 0; i < mComponents.length; i++) {
@@ -183,11 +205,7 @@ public final class FormattedEntityIdRowFilter extends KijiRowFilter {
             // bytes
             regex.append("(.{").append(Bytes.SIZEOF_INT).append("})?");
           } else {
-            byte[] tempBytes = ByteBuffer.allocate(Integer.SIZE / Byte.SIZE)
-                .putInt((Integer) component).array();
-            // FormattedEntityId flips the sign of the most significant bit to
-            // maintain byte ordering, so do the same operation here
-            tempBytes[0] = (byte) ((int) tempBytes[0] ^ (int) Byte.MIN_VALUE);
+            byte[] tempBytes = toBytes((Integer) component);
             // match each byte in the integer using a regex hex sequence
             for (byte tempByte : tempBytes) {
               regex.append(String.format("\\x%02x", tempByte & 0xFF));
@@ -201,11 +219,7 @@ public final class FormattedEntityIdRowFilter extends KijiRowFilter {
             // bytes
             regex.append("(.{").append(Bytes.SIZEOF_LONG).append("})?");
           } else {
-            byte[] tempBytes = ByteBuffer.allocate(Long.SIZE / Byte.SIZE)
-                .putLong((Long) component).array();
-            // FormattedEntityId flips the sign of the most significant bit to
-            // maintain byte ordering, so do the same operation here
-            tempBytes[0] = (byte) ((int) tempBytes[0] ^ (int) Byte.MIN_VALUE);
+            byte[] tempBytes = toBytes((Long) component);
             // match each byte in the long using a regex hex sequence
             for (byte tempByte : tempBytes) {
               regex.append(String.format("\\x%02x", tempByte & 0xFF));
@@ -224,7 +238,7 @@ public final class FormattedEntityIdRowFilter extends KijiRowFilter {
             // value it sees (ie, the HBase key) to a string using ISO-8859-1.
             // Therefore, we need to write ISO-8859-1 characters to our regex so
             // that the comparison happens correctly.
-            byte[] utfBytes = ((String) component).getBytes(Charsets.UTF_8);
+            byte[] utfBytes = toBytes((String) component);
             String isoString = new String(utfBytes, Charsets.ISO_8859_1);
             regex.append(isoString).append("\\x00");
           }
@@ -239,6 +253,91 @@ public final class FormattedEntityIdRowFilter extends KijiRowFilter {
     final RegexStringComparator comparator = new RegexStringComparator(regex.toString());
     comparator.setCharset(Charsets.ISO_8859_1);
     return new RowFilter(CompareOp.EQUAL, comparator);
+  }
+
+  /**
+   * Return the first non-null components up to a total of {@code
+   * rangeScanStartIndex}.
+   *
+   * @param components The full list of components
+   * @param rangeScanStartIndex The index at which to stop looking for non-null
+   *     components
+   * @return The first non-null components up to {@code rangeScanStartIndex}
+   */
+  private static Object[] getNonNullPrefixComponents(Object[] components, int rangeScanStartIndex) {
+    List<Object> prefixComponents = newArrayList();
+    // Create a list of the prefix set of non-null components up to the
+    // specified amount.
+    for (int i = 0; i < rangeScanStartIndex; i++) {
+      if (components[i] != null) {
+        prefixComponents.add(components[i]);
+      } else {
+        break;
+      }
+    }
+    return prefixComponents.toArray();
+  }
+
+  /**
+   * Convert a component to a byte array according to the rules in {@link
+   * FormattedEntityId}.
+   *
+   * @param component The component to convert
+   * @return The byte representation
+   */
+  private static byte[] toBytes(Object component) {
+    if (component instanceof String) {
+      return toBytes((String) component);
+    }
+    if (component instanceof Integer) {
+      return toBytes((Integer) component);
+    }
+    if (component instanceof Long) {
+      return toBytes((Long) component);
+    }
+    throw new IllegalArgumentException("Unknown component type: "
+        + component.getClass() + "; value: " + component);
+  }
+
+  /**
+   * Convert a component to a byte array according to the rules in {@link
+   * FormattedEntityId}.
+   *
+   * @param component The component to convert
+   * @return The byte representation
+   */
+  private static byte[] toBytes(String component) {
+    return component.getBytes(Charsets.UTF_8);
+  }
+
+  /**
+   * Convert a component to a byte array according to the rules in {@link
+   * FormattedEntityId}.
+   *
+   * @param component The component to convert
+   * @return The byte representation
+   */
+  private static byte[] toBytes(Integer component) {
+    byte[] tempBytes = ByteBuffer.allocate(Bytes.SIZEOF_INT).putInt(component).array();
+    // FormattedEntityId flips the sign of the most significant bit to
+    // maintain byte ordering, so do the same operation here
+    tempBytes[0] = (byte) ((int) tempBytes[0] ^ (int) Byte.MIN_VALUE);
+    return tempBytes;
+  }
+
+  /**
+   * Convert a component to a byte array according to the rules in {@link
+   * FormattedEntityId}.
+   *
+   * @param component The component to convert
+   * @return The byte representation
+   */
+  private static byte[] toBytes(Long component) {
+    byte[] tempBytes = ByteBuffer.allocate(Bytes.SIZEOF_LONG).putLong(component).array();
+    // FormattedEntityId flips the sign of the most significant bit to
+    // maintain byte ordering, so do the same operation here
+    tempBytes[0] = (byte) ((int) tempBytes[0] ^ (int) Byte.MIN_VALUE);
+    return tempBytes;
   }
 
   /** {@inheritDoc} */

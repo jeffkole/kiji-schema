@@ -33,6 +33,8 @@ import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Random;
 
+import com.google.common.collect.ImmutableList;
+
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.RowFilter;
 import org.apache.hadoop.hbase.filter.WritableByteArrayComparable;
@@ -156,7 +158,6 @@ public class TestFormattedEntityIdRowFilter {
     List<FilterAndTestValues> filterAndTestValues = newArrayList();
 
     List<List<Object>> filterCombinations = createFilterCombinations(components);
-    // System.out.printf("Combinations: %s%n", filterCombinations);
     // skip over the last all-null combination, which does not make much sense
     // for a filter
     for (List<Object> filterValues : filterCombinations.subList(0, filterCombinations.size() - 1)) {
@@ -167,7 +168,6 @@ public class TestFormattedEntityIdRowFilter {
 
       List<List<Object>> excludedCombinations =
           createExcludedCombinations(components, filterValues);
-      // System.err.printf("Excludes for %s are %s%n", filterValues, excludedCombinations);
       for (List<Object> excludedCombination : excludedCombinations) {
         fatv.mExcludedTestValues.add(excludedCombination);
       }
@@ -363,18 +363,65 @@ public class TestFormattedEntityIdRowFilter {
     assertEquals(INCLUDE, filtered);
   }
 
+  @Test
+  public void testHashIsCalculatedWhenAllHashComponentsAreSpecified() throws Exception {
+    final int hashLength = 2;
+    RowKeyFormat2.Builder builder = RowKeyFormat2.newBuilder()
+        .setEncoding(RowKeyEncoding.FORMATTED)
+        .setSalt(new HashSpec(HashType.MD5, hashLength, false))
+        .setRangeScanStartIndex(1);
+
+    List<RowKeyComponent> components = ImmutableList.of(
+            new RowKeyComponent("id", INTEGER), // this one is included in the hash
+            new RowKeyComponent("ts", LONG));   // this one is not
+    builder.setComponents(components);
+    RowKeyFormat2 rowKeyFormat = builder.build();
+
+    EntityIdFactory factory = EntityIdFactory.getFactory(rowKeyFormat);
+    FormattedEntityIdRowFilter filter = createFilter(rowKeyFormat, 100);
+    Object[] componentValues = new Object[] { Integer.valueOf(100), Long.valueOf(900000L) };
+    runTest(rowKeyFormat, filter, factory, INCLUDE, componentValues);
+
+    EntityId entityId = factory.getEntityId(componentValues);
+    byte[] hbaseKey = entityId.getHBaseRowKey();
+    Filter hbaseFilter = filter.toHBaseFilter(null);
+
+    // A row key with a different hash but the same first component should be
+    // excluded by the filter. The hash is 0x9f0f
+    hbaseKey[0] = (byte) 0x7F;
+    hbaseKey[1] = (byte) 0xFF;
+    boolean filtered = hbaseFilter.filterRowKey(hbaseKey, 0, hbaseKey.length);
+    doInclusionAssert(rowKeyFormat, filter, entityId, hbaseFilter, hbaseKey, EXCLUDE);
+  }
+
+  @Test
+  public void testHashWildcardIsUsedForMissingHashComponents() throws Exception {
+    RowKeyFormat2 rowKeyFormat = createRowKeyFormat(1, INTEGER, LONG, STRING);
+    rowKeyFormat.setRangeScanStartIndex(2);
+    EntityIdFactory factory = EntityIdFactory.getFactory(rowKeyFormat);
+
+    FormattedEntityIdRowFilter filter = createFilter(rowKeyFormat, 100, null, "value");
+    runTest(rowKeyFormat, filter, factory, INCLUDE, 100, 2000L, "value");
+    runTest(rowKeyFormat, filter, factory, EXCLUDE, 100, null, null);
+    runTest(rowKeyFormat, filter, factory, EXCLUDE, 0, null, null);
+  }
+
   private void runTest(RowKeyFormat2 rowKeyFormat, FormattedEntityIdRowFilter filter,
       EntityIdFactory factory, boolean expectedFilter, Object... components) throws Exception {
-    // System.out.printf("Components %s%n", java.util.Arrays.asList(components));
     EntityId entityId = factory.getEntityId(components);
     byte[] hbaseKey = entityId.getHBaseRowKey();
     Filter hbaseFilter = filter.toHBaseFilter(null);
+    doInclusionAssert(rowKeyFormat, filter, entityId, hbaseFilter, hbaseKey, expectedFilter);
+  }
+
+  private void doInclusionAssert(RowKeyFormat2 rowKeyFormat, FormattedEntityIdRowFilter filter,
+      EntityId entityId, Filter hbaseFilter, byte[] hbaseKey, boolean expectedFilter)
+      throws Exception {
     boolean filtered = hbaseFilter.filterRowKey(hbaseKey, 0, hbaseKey.length);
     String message = String.format(
         "RowKeyFormat: %s%nComponents: %s%nEntityId: %s%nRegex: %s%nHBase key: %s%nIncluded: %s%n",
         rowKeyFormat, fetchComponents(filter), entityId.toShellString(), fetchRegex(hbaseFilter),
         toBinaryString(hbaseKey), !filtered);
-    System.out.println(message);
     assertEquals(message, expectedFilter, filtered);
   }
 
